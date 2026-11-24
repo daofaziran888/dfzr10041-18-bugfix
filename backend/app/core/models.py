@@ -226,6 +226,81 @@ class EventRecord:
     source_host: str
     store_partition: str = ""
     index_state: str = "已写入"
+    # 身份字段：同一来源同一行的重复提交/断线重采必须命中同一身份，
+    # 不同来源或同文件不同位置各自独立计数。
+    source_id: str = ""
+    source_line_no: int = 0
+    source_line_key: str = ""
+    raw_checksum: str = ""
+    # 分类版本与依据：更正必须绑定旧原行内容与旧分类依据才能修订。
+    classification_version: str = ""
+    classification_basis: "ClassificationBasis | None" = None
+
+
+@dataclass
+class ClassificationBasis:
+    """事件分类依据的留痕——解析更正必须携带与持久证据一致的旧依据。"""
+    level: str = ""
+    action: str = ""
+    rule_id: str = ""
+    type_id: str = ""
+
+    def matches(self, other: "ClassificationBasis | None") -> bool:
+        if other is None:
+            return False
+        return (
+            self.level == other.level
+            and self.action == other.action
+            and self.rule_id == other.rule_id
+            and self.type_id == other.type_id
+        )
+
+
+@dataclass
+class ConfirmedEvent:
+    """确认批次中的单行事件清单条目——采集作业续采所依据的持久来源证据。"""
+    source_line_key: str
+    source_id: str
+    source_line_no: int
+    record_id: str
+    raw_checksum: str
+    original_content: str
+    event_type_id: str
+    classification_version: str
+    classification_basis: ClassificationBasis
+
+
+@dataclass
+class ConfirmedManifest:
+    """确认批次的完整事件清单——一轮只认一个完整确认的分类版本。"""
+    manifest_id: str
+    source_id: str
+    classification_version: str
+    events: list[ConfirmedEvent]
+    created_at: datetime = field(default_factory=datetime.now)
+    state: str = "已确认"          # 已确认 / 已领用 / 已结案 / 已交回 / 已作废
+    claim: "ReplayClaim | None" = None
+    supersedes_version: str = ""
+
+    def find_event(self, source_line_key: str) -> ConfirmedEvent | None:
+        for item in self.events:
+            if item.source_line_key == source_line_key:
+                return item
+        return None
+
+
+@dataclass
+class ReplayClaim:
+    """值班人员对确认清单的重放认领记录——领用、结案、交回全链路可回查。"""
+    claim_id: str
+    manifest_id: str
+    source_id: str
+    classification_version: str
+    claimed_at: datetime = field(default_factory=datetime.now)
+    closed_at: datetime | None = None
+    state: str = "已领用"          # 已领用 / 已结案 / 已交回
+    settled_results: int = 0
+    settled_version: str = ""
 
 
 @dataclass
@@ -343,3 +418,44 @@ class ForwardRule:
     batch_size: int = 100
     retry_limit: int = 3
     timeout_seconds: int = 30
+
+
+@dataclass
+class ParseCorrection:
+    """解析更正请求——只允许修订同一来源同一行的唯一事件。
+
+    位置没变但原文字节不符（raw_checksum 不一致）的修订必须拒绝；
+    同时必须绑定旧分类依据，旧依据与持久证据不符也必须拒绝。
+    """
+    source_id: str
+    source_line_no: int
+    expected_raw_line: str
+    expected_raw_checksum: str
+    expected_basis: ClassificationBasis
+    new_parsed_fields: dict[str, str]
+    new_raw_line: str | None = None
+    correction_id: str = ""
+
+
+@dataclass
+class ReplayResult:
+    """单行重放回放结果——按确认清单逐行核销。"""
+    source_line_key: str
+    source_id: str
+    manifest_id: str
+    success: bool
+    detail: str = ""
+
+
+@dataclass
+class SourceProgress:
+    """来源级持久进度——续采、核销、结算都以持久保存的来源证据为准。"""
+    source_id: str
+    processed_line_keys: set[str] = field(default_factory=set)
+    replayed_line_keys: set[str] = field(default_factory=set)
+    failed_line_keys: set[str] = field(default_factory=set)
+    replay_success_count: int = 0
+    # 进入结算的分类版本（任何时点只结算一次，且可回查哪版分类进入了结算）
+    settled_claim_id: str = ""
+    settled_version: str = ""
+    settled_at: datetime | None = None
